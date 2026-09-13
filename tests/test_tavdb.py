@@ -38,7 +38,7 @@ def test_where_filter():
 def test_audit_exists():
  c=client();h=auth(c,'c11');run(c,h,'SELECT id FROM employees');assert c.get('/audit/logs',headers=h).json();c.__exit__(None,None,None)
 def test_database_crud():
- c=client();h=auth(c,'c12');c.post('/databases',headers=h,json={'name':'demo','description':'x'});assert any(x['name']=='demo' for x in c.get('/databases',headers=h).json());c.__exit__(None,None,None)
+ c=client();h=auth(c,'c12');name='demo-c12';c.post('/databases',headers=h,json={'name':name,'description':'x'});assert any(x['name']==name for x in c.get('/databases',headers=h).json());c.__exit__(None,None,None)
 def test_query_lookup():
  c=client();h=auth(c,'c13');q=run(c,h,'SELECT id FROM employees');assert c.get('/queries/'+str(q['query_id']),headers=h).status_code==200;c.__exit__(None,None,None)
 def test_natural_language_query():
@@ -55,3 +55,5 @@ def test_general_purpose_product_request():
  c=client();h=auth(c,'c19');r=c.post('/queries/natural',headers=h,json={'prompt':'list product names and prices'}).json();assert r['decision']=='ALLOW' and r['result'][0]['name']=='Laptop';c.__exit__(None,None,None)
 def test_adaptive_learner_records_history():
  c=client();h=auth(c,'c20');run(c,h,'SELECT id FROM employees','non-trusted-node');from app.database import SessionLocal;from app.models import Node;db=SessionLocal();score,stats=AdaptiveRoutingLearner().score(db,db.query(Node).filter_by(name='non-trusted-node').first());db.close();assert stats['samples']>=1 and score>=0;c.__exit__(None,None,None)
+def test_persistent_data_crud_and_query():
+ c=client();h=auth(c,'c21');created=c.post('/data/employees',headers=h,json={'values':{'name':'Cara','department':'Engineering','salary':110000,'medical_information':'restricted'}});assert created.status_code==201;record=created.json();assert record['name']=='Cara';assert c.put('/data/employees/'+str(record['id']),headers=h,json={'values':{'department':'Security'}}).json()['department']=='Security';rows=run(c,h,"SELECT name FROM employees WHERE department = 'Security'",'non-trusted-node')['result'];assert any(row['name']=='Cara' for row in rows);assert c.delete('/data/employees/'+str(record['id']),headers=h).status_code==204;c.__exit__(None,None,None)

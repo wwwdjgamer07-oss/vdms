@@ -43,6 +43,28 @@ Or start services with `docker compose up --build`, then open `/docs` or `/dashb
 
 Set `DATABASE_URL` to a hosted PostgreSQL URL and `JWT_SECRET` to a long random value in Vercel Project Settings before deploying. Standard `postgres://` and `postgresql://` provider URLs are normalized automatically for the installed `psycopg` driver. A Vercel deployment without `DATABASE_URL` uses ephemeral `/tmp` SQLite only as a preview fallback; data will not persist.
 
+## Persistent application data
+
+The managed `employees`, `customers`, `products`, `orders`, `students`, and
+`patients` tables are real SQLAlchemy tables, not in-memory fixtures. They are
+created at startup and are read by the policy-routed query layer. Use the Data
+Manager at `/dashboard/data.html` after signing in, or the authenticated API:
+
+```text
+GET    /data/{table}       list records
+POST   /data/{table}       create: {"values": {"name": "Cara", ...}}
+PUT    /data/{table}/{id}  update supplied values
+DELETE /data/{table}/{id}  delete a record
+```
+
+Only the approved table columns can be written. The generated `id` cannot be
+supplied by clients, and all SQL reads continue through the parser, trust
+policy, router, and audit trail.
+
+For persistent Vercel data, set `DATABASE_URL` to a hosted PostgreSQL instance.
+The `/tmp` SQLite preview fallback is ephemeral and will lose records when the
+deployment is recycled.
+
 ## Data model and audit
 
 SQLAlchemy models cover User, Database, Node, TableMetadata, ColumnMetadata, QueryRequest, QueryExecution, and AuditLog. Every decision includes requested data, selected node/trust level, reason, outcome, and duration at `GET /audit/logs`.

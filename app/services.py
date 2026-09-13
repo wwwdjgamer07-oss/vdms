@@ -1,16 +1,10 @@
 import re, json, time
 from datetime import datetime
 from dataclasses import dataclass
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from .models import Node, QueryRequest, QueryExecution, AuditLog
-CLASSIFICATIONS={
- 'employees':{'id':'PUBLIC','name':'INTERNAL','department':'INTERNAL','salary':'CONFIDENTIAL','medical_information':'HIGHLY_CONFIDENTIAL'},
- 'customers':{'id':'PUBLIC','name':'INTERNAL','city':'INTERNAL','email':'CONFIDENTIAL','phone':'CONFIDENTIAL'},
- 'products':{'id':'PUBLIC','name':'PUBLIC','category':'INTERNAL','price':'CONFIDENTIAL','supplier_cost':'CONFIDENTIAL'},
- 'orders':{'id':'PUBLIC','customer_name':'INTERNAL','product_name':'INTERNAL','status':'INTERNAL','total':'CONFIDENTIAL'},
- 'students':{'id':'PUBLIC','name':'INTERNAL','course':'INTERNAL','marks':'CONFIDENTIAL','guardian_contact':'HIGHLY_CONFIDENTIAL'},
- 'patients':{'id':'PUBLIC','name':'CONFIDENTIAL','department':'INTERNAL','diagnosis':'HIGHLY_CONFIDENTIAL','medical_information':'HIGHLY_CONFIDENTIAL'}
-}
+from .data_schema import CLASSIFICATIONS, TABLES
 RANK={'PUBLIC':0,'INTERNAL':1,'CONFIDENTIAL':2,'HIGHLY_CONFIDENTIAL':3}
 SAFE_TABLES=set(CLASSIFICATIONS)
 
@@ -143,29 +137,30 @@ class VirtualDatabaseLayer:
                 return self._run(db,qr,user,parsed,trusted,'REWRITE','Split plan: sensitive projection retained in trusted layer; non-trusted receives only safe projection',started)
         return self._audit(db,qr,user,parsed,'','DENY','No node may safely execute this query',started,[])
     def _run(self,db,qr,user,p,node,decision,reason,started):
-        # Deterministic replica data for each configured demonstration domain.
+        # User SQL is parsed and allowlisted before this point. Build a
+        # parameterized SQLAlchemy query over persistent SQL tables instead.
         try:
-          data={
-          'employees':[{'id':1,'name':'Alice','department':'Engineering','salary':120000,'medical_information':'restricted'},{'id':2,'name':'Bob','department':'Sales','salary':90000,'medical_information':'restricted'}],
-          'customers':[{'id':1,'name':'Maya','city':'Delhi','email':'maya@example.test','phone':'9000000001'},{'id':2,'name':'Ravi','city':'Mumbai','email':'ravi@example.test','phone':'9000000002'}],
-          'products':[{'id':1,'name':'Laptop','category':'Electronics','price':75000,'supplier_cost':50000},{'id':2,'name':'Chair','category':'Furniture','price':6000,'supplier_cost':3500}],
-          'orders':[{'id':1,'customer_name':'Maya','product_name':'Laptop','status':'Shipped','total':75000},{'id':2,'customer_name':'Ravi','product_name':'Chair','status':'Processing','total':6000}],
-          'students':[{'id':1,'name':'Asha','course':'Computer Science','marks':91,'guardian_contact':'restricted'},{'id':2,'name':'Dev','course':'Mathematics','marks':84,'guardian_contact':'restricted'}],
-          'patients':[{'id':1,'name':'Patient A','department':'Cardiology','diagnosis':'restricted','medical_information':'restricted'},{'id':2,'name':'Patient B','department':'Neurology','diagnosis':'restricted','medical_information':'restricted'}]
-          }; rows=data[p.table]
+          table = TABLES[p.table]
+          filters = []
           if p.where:
               for condition in re.split(r'\s+AND\s+',p.where,flags=re.I):
-                  dept=re.fullmatch(r"department\s*=\s*'([^']+)'",condition,re.I); name=re.fullmatch(r"name\s*=\s*'([^']+)'",condition,re.I); salary=re.fullmatch(r'salary\s*(>=|<=|>|<|=)\s*(\d+)',condition,re.I)
-                  if dept: rows=[r for r in rows if r['department'].lower()==dept.group(1).lower()]
-                  elif name: rows=[r for r in rows if r['name'].lower()==name.group(1).lower()]
-                  elif salary:
-                      op,n=salary.group(1),int(salary.group(2)); rows=[r for r in rows if {'>':r['salary']>n,'<':r['salary']<n,'>=':r['salary']>=n,'<=':r['salary']<=n,'=':r['salary']==n}[op]]
-                  else: return self._audit(db,qr,user,p,node,'DENY','Only approved department, name, and salary filters are allowlisted',started,[])
-          if p.aggregate=='COUNT': result=[{'count':len(rows)}]
-          elif p.aggregate=='AVG': result=[{'average_'+p.columns[0]:sum(r[p.columns[0]] for r in rows)/len(rows) if rows else 0}]
-          elif p.aggregate=='SUM': result=[{'sum_'+p.columns[0]:sum(r[p.columns[0]] for r in rows)}]
-          else: result=[{c:r[c] for c in p.columns} for r in rows]
-          if p.limit: result=result[:p.limit]
+                  match = re.fullmatch(r"([a-z_]\w*)\s*(>=|<=|>|<|=)\s*(?:'([^']*)'|(\d+(?:\.\d+)?))", condition, re.I)
+                  if not match or match.group(1).lower() not in table.c:
+                      return self._audit(db,qr,user,p,node,'DENY','Only allowlisted column filters are supported',started,[])
+                  column, operator, text_value, number_value = match.groups()
+                  value = text_value if text_value is not None else float(number_value)
+                  field = table.c[column.lower()]
+                  filters.append({'=': field == value, '>': field > value, '<': field < value, '>=': field >= value, '<=': field <= value}[operator])
+          if p.aggregate == 'COUNT':
+              statement = select(func.count().label('count')).select_from(table)
+          elif p.aggregate in ('AVG', 'SUM'):
+              aggregate = func.avg(table.c[p.columns[0]]) if p.aggregate == 'AVG' else func.sum(table.c[p.columns[0]])
+              statement = select(aggregate.label(('average_' if p.aggregate == 'AVG' else 'sum_') + p.columns[0]))
+          else:
+              statement = select(*(table.c[column] for column in p.columns))
+          if filters: statement = statement.where(*filters)
+          if p.limit and not p.aggregate: statement = statement.limit(p.limit)
+          result = [dict(row) for row in db.execute(statement).mappings()]
           return self._audit(db,qr,user,p,node,decision,reason,started,result)
         except (KeyError, TypeError, ValueError) as error:
           health_reason = f'Execution integrity failure: {error}'

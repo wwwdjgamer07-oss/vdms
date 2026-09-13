@@ -1,7 +1,7 @@
 import json
 from contextlib import asynccontextmanager
 from pathlib import Path
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, Response
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -10,6 +10,7 @@ from .database import Base,engine,get_db
 from .models import User,Node,Database,QueryRequest,AuditLog,TableMetadata,ColumnMetadata
 from .security import hash_password,verify_password,token_for,current_user
 from .services import VirtualDatabaseLayer, NaturalLanguageTranslator, NodeHealthMonitor, CLASSIFICATIONS
+from .data_schema import TABLES, create_data_tables, seed_data
 def seed(db):
     if not db.query(Node).count():
       nodes=[('trusted-node','TRUSTED',['SELECT']),('semi-trusted-node','SEMI_TRUSTED',['SELECT']),('non-trusted-node','NON_TRUSTED',['SELECT'])]
@@ -23,7 +24,7 @@ def seed(db):
     db.commit()
 @asynccontextmanager
 async def lifespan(app):
-    Base.metadata.create_all(engine); db=next(get_db()); seed(db); db.close(); yield
+    Base.metadata.create_all(engine); create_data_tables(engine); db=next(get_db()); seed(db); seed_data(db); db.close(); yield
 app=FastAPI(title='Trust-Aware Virtual Database',lifespan=lifespan)
 app.mount('/dashboard',StaticFiles(directory=str(Path(__file__).resolve().parent.parent / 'dashboard'),html=True),name='dashboard')
 @app.get('/', include_in_schema=False)
@@ -34,6 +35,7 @@ class NodeIn(BaseModel): name:str; host:str='localhost'; port:int=5432; database
 class QueryIn(BaseModel): sql:str; preferred_node:str|None=None
 class NaturalQueryIn(BaseModel): prompt:str=Field(min_length=3,max_length=500); preferred_node:str|None=None
 class DatabaseIn(BaseModel): name:str; description:str=''
+class RecordIn(BaseModel): values:dict[str, str|int|float]
 @app.post('/auth/register')
 def register(x:Credentials,db:Session=Depends(get_db)):
     if db.query(User).filter_by(username=x.username).first(): raise HTTPException(409,'Username already exists')
@@ -55,9 +57,36 @@ def node_health(_:User=Depends(current_user),db:Session=Depends(get_db)):
 def node(x:NodeIn,_:User=Depends(current_user),db:Session=Depends(get_db)):
     n=Node(**x.model_dump(exclude={'allowed_operations','allowed_tables'}),allowed_operations=json.dumps(x.allowed_operations),allowed_tables=json.dumps(x.allowed_tables));db.add(n);db.commit();return n
 @app.post('/databases')
-def database(x:DatabaseIn,_:User=Depends(current_user),db:Session=Depends(get_db)): d=Database(**x.model_dump());db.add(d);db.commit();return d
+def database(x:DatabaseIn,_:User=Depends(current_user),db:Session=Depends(get_db)):
+    if db.query(Database).filter_by(name=x.name).first(): raise HTTPException(409, 'Database already exists')
+    d=Database(**x.model_dump()); db.add(d); db.commit(); return d
 @app.get('/databases')
 def databases(_:User=Depends(current_user),db:Session=Depends(get_db)): return db.query(Database).all()
+def managed_table(table_name: str):
+    table = TABLES.get(table_name.lower())
+    if table is None: raise HTTPException(404, 'Unknown managed table')
+    return table
+def checked_values(table, values):
+    unknown = set(values) - (set(table.c.keys()) - {'id'})
+    if unknown: raise HTTPException(422, f'Unknown or protected columns: {", ".join(sorted(unknown))}')
+    if not values: raise HTTPException(422, 'Provide at least one column value')
+    return values
+@app.get('/data/{table_name}')
+def list_data(table_name:str,_:User=Depends(current_user),db:Session=Depends(get_db)):
+    table=managed_table(table_name); return [dict(row) for row in db.execute(table.select().limit(200)).mappings()]
+@app.post('/data/{table_name}', status_code=201)
+def add_data(table_name:str,x:RecordIn,_:User=Depends(current_user),db:Session=Depends(get_db)):
+    table=managed_table(table_name); values=checked_values(table,x.values); result=db.execute(table.insert().values(**values)); db.commit(); return dict(db.execute(table.select().where(table.c.id==result.inserted_primary_key[0])).mappings().one())
+@app.put('/data/{table_name}/{record_id}')
+def update_data(table_name:str,record_id:int,x:RecordIn,_:User=Depends(current_user),db:Session=Depends(get_db)):
+    table=managed_table(table_name); values=checked_values(table,x.values); result=db.execute(table.update().where(table.c.id==record_id).values(**values))
+    if not result.rowcount: db.rollback(); raise HTTPException(404,'Record not found')
+    db.commit(); return dict(db.execute(table.select().where(table.c.id==record_id)).mappings().one())
+@app.delete('/data/{table_name}/{record_id}', status_code=204)
+def delete_data(table_name:str,record_id:int,_:User=Depends(current_user),db:Session=Depends(get_db)):
+    table=managed_table(table_name); result=db.execute(table.delete().where(table.c.id==record_id))
+    if not result.rowcount: db.rollback(); raise HTTPException(404,'Record not found')
+    db.commit(); return Response(status_code=204)
 @app.post('/queries')
 def query(x:QueryIn,u:User=Depends(current_user),db:Session=Depends(get_db)): return VirtualDatabaseLayer().execute(db,u,x.sql,x.preferred_node)
 @app.post('/queries/natural')
