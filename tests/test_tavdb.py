@@ -1,0 +1,42 @@
+import os
+os.environ['DATABASE_URL']='sqlite:///./test_tavdb.db'
+from fastapi.testclient import TestClient
+from app.main import app
+def client():
+    c=TestClient(app); c.__enter__(); return c
+def auth(c, name='tester'):
+    c.post('/auth/register',json={'username':name,'password':'password1'})
+    return {'Authorization':'Bearer '+c.post('/auth/login',json={'username':name,'password':'password1'}).json()['access_token']}
+def run(c,h,sql,node=None): return c.post('/queries',headers=h,json={'sql':sql,'preferred_node':node}).json()
+def test_register_login():
+ c=client(); h=auth(c,'alpha'); assert h['Authorization'].startswith('Bearer '); c.__exit__(None,None,None)
+def test_auth_required():
+ c=client(); assert c.get('/nodes').status_code==403; c.__exit__(None,None,None)
+def test_nodes_seeded():
+ c=client(); h=auth(c,'beta'); assert len(c.get('/nodes',headers=h).json())>=3; c.__exit__(None,None,None)
+def test_public_nontrusted():
+ c=client();h=auth(c,'c1');assert run(c,h,'SELECT id FROM employees','non-trusted-node')['decision']=='ALLOW';c.__exit__(None,None,None)
+def test_internal_nontrusted():
+ c=client();h=auth(c,'c2');assert run(c,h,'SELECT name FROM employees','non-trusted-node')['decision']=='ALLOW';c.__exit__(None,None,None)
+def test_confidential_rewritten():
+ c=client();h=auth(c,'c3');assert run(c,h,'SELECT salary FROM employees','non-trusted-node')['decision']=='REWRITE';c.__exit__(None,None,None)
+def test_highly_confidential_rewritten():
+ c=client();h=auth(c,'c4');assert run(c,h,'SELECT medical_information FROM employees','non-trusted-node')['decision']=='REWRITE';c.__exit__(None,None,None)
+def test_confidential_trusted():
+ c=client();h=auth(c,'c5');assert run(c,h,'SELECT salary FROM employees','trusted-node')['decision']=='ALLOW';c.__exit__(None,None,None)
+def test_injection_blocked():
+ c=client();h=auth(c,'c6');assert run(c,h,'SELECT id FROM employees; DROP TABLE employees')['decision']=='DENY';c.__exit__(None,None,None)
+def test_drop_blocked():
+ c=client();h=auth(c,'c7');assert run(c,h,'DROP TABLE employees')['decision']=='DENY';c.__exit__(None,None,None)
+def test_update_blocked():
+ c=client();h=auth(c,'c8');assert run(c,h,"UPDATE employees SET salary=1")['decision']=='DENY';c.__exit__(None,None,None)
+def test_unknown_column():
+ c=client();h=auth(c,'c9');assert run(c,h,'SELECT secret FROM employees')['decision']=='DENY';c.__exit__(None,None,None)
+def test_where_filter():
+ c=client();h=auth(c,'c10');assert len(run(c,h,"SELECT name FROM employees WHERE department = 'Engineering'",'non-trusted-node')['result'])==1;c.__exit__(None,None,None)
+def test_audit_exists():
+ c=client();h=auth(c,'c11');run(c,h,'SELECT id FROM employees');assert c.get('/audit/logs',headers=h).json();c.__exit__(None,None,None)
+def test_database_crud():
+ c=client();h=auth(c,'c12');c.post('/databases',headers=h,json={'name':'demo','description':'x'});assert any(x['name']=='demo' for x in c.get('/databases',headers=h).json());c.__exit__(None,None,None)
+def test_query_lookup():
+ c=client();h=auth(c,'c13');q=run(c,h,'SELECT id FROM employees');assert c.get('/queries/'+str(q['query_id']),headers=h).status_code==200;c.__exit__(None,None,None)

@@ -1,0 +1,25 @@
+services:
+  api:
+    build: .
+    ports: ["8000:8000"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://tavdb:tavdb@postgres/tavdb
+      JWT_SECRET: local-demo-secret
+    depends_on: [postgres, trusted-db, semi-trusted-db, non-trusted-db]
+  postgres:
+    image: postgres:16-alpine
+    environment: { POSTGRES_USER: tavdb, POSTGRES_PASSWORD: tavdb, POSTGRES_DB: tavdb }
+    volumes: ["metadata:/var/lib/postgresql/data"]
+  trusted-db:
+    image: postgres:16-alpine
+    environment: { POSTGRES_USER: trusted_user, POSTGRES_PASSWORD: trusted_pw, POSTGRES_DB: employees }
+    volumes: ["./infra/trusted-init.sql:/docker-entrypoint-initdb.d/init.sql:ro"]
+  semi-trusted-db:
+    image: postgres:16-alpine
+    environment: { POSTGRES_USER: postgres, POSTGRES_PASSWORD: postgres_pw, POSTGRES_DB: employees }
+    volumes: ["./infra/semi-init.sql:/docker-entrypoint-initdb.d/init.sql:ro"]
+  non-trusted-db:
+    image: postgres:16-alpine
+    environment: { POSTGRES_USER: postgres, POSTGRES_PASSWORD: postgres_pw, POSTGRES_DB: employees }
+    volumes: ["./infra/nontrusted-init.sql:/docker-entrypoint-initdb.d/init.sql:ro"]
+volumes: { metadata: {} }
