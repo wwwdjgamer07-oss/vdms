@@ -7,10 +7,11 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from .database import Base,engine,get_db
-from .models import User,Node,Database,QueryRequest,AuditLog,TableMetadata,ColumnMetadata
+from .models import User,Node,Database,QueryRequest,AuditLog,TableMetadata,ColumnMetadata,StorageReplica
 from .security import hash_password,verify_password,token_for,current_user
 from .services import VirtualDatabaseLayer, NaturalLanguageTranslator, NodeHealthMonitor, CLASSIFICATIONS
 from .data_schema import TABLES, create_data_tables, seed_data
+from .storage import encrypt_replica
 def seed(db):
     if not db.query(Node).count():
       nodes=[('trusted-node','TRUSTED',['SELECT']),('semi-trusted-node','SEMI_TRUSTED',['SELECT']),('non-trusted-node','NON_TRUSTED',['SELECT'])]
@@ -76,17 +77,21 @@ def list_data(table_name:str,_:User=Depends(current_user),db:Session=Depends(get
     table=managed_table(table_name); return [dict(row) for row in db.execute(table.select().limit(200)).mappings()]
 @app.post('/data/{table_name}', status_code=201)
 def add_data(table_name:str,x:RecordIn,_:User=Depends(current_user),db:Session=Depends(get_db)):
-    table=managed_table(table_name); values=checked_values(table,x.values); result=db.execute(table.insert().values(**values)); db.commit(); return dict(db.execute(table.select().where(table.c.id==result.inserted_primary_key[0])).mappings().one())
+    table=managed_table(table_name); values=checked_values(table,x.values); result=db.execute(table.insert().values(**values)); record=dict(db.execute(table.select().where(table.c.id==result.inserted_primary_key[0])).mappings().one()); token,digest=encrypt_replica(record); db.add(StorageReplica(table_name=table_name,record_id=record['id'],node_name='non-trusted-node',encrypted_payload=token,integrity_hash=digest)); db.commit(); record['storage_node']='non-trusted-node'; record['storage_state']='encrypted replica stored'; return record
 @app.put('/data/{table_name}/{record_id}')
 def update_data(table_name:str,record_id:int,x:RecordIn,_:User=Depends(current_user),db:Session=Depends(get_db)):
     table=managed_table(table_name); values=checked_values(table,x.values); result=db.execute(table.update().where(table.c.id==record_id).values(**values))
     if not result.rowcount: db.rollback(); raise HTTPException(404,'Record not found')
-    db.commit(); return dict(db.execute(table.select().where(table.c.id==record_id)).mappings().one())
+    record=dict(db.execute(table.select().where(table.c.id==record_id)).mappings().one()); token,digest=encrypt_replica(record); db.query(StorageReplica).filter_by(table_name=table_name,record_id=record_id,node_name='non-trusted-node').delete(); db.add(StorageReplica(table_name=table_name,record_id=record_id,node_name='non-trusted-node',encrypted_payload=token,integrity_hash=digest)); db.commit(); record['storage_node']='non-trusted-node'; record['storage_state']='encrypted replica updated'; return record
 @app.delete('/data/{table_name}/{record_id}', status_code=204)
 def delete_data(table_name:str,record_id:int,_:User=Depends(current_user),db:Session=Depends(get_db)):
     table=managed_table(table_name); result=db.execute(table.delete().where(table.c.id==record_id))
     if not result.rowcount: db.rollback(); raise HTTPException(404,'Record not found')
+    db.query(StorageReplica).filter_by(table_name=table_name,record_id=record_id).delete()
     db.commit(); return Response(status_code=204)
+@app.get('/data/{table_name}/{record_id}/replicas')
+def replicas(table_name:str,record_id:int,_:User=Depends(current_user),db:Session=Depends(get_db)):
+    managed_table(table_name); return [{'node':x.node_name,'integrity_hash':x.integrity_hash,'created_at':x.created_at} for x in db.query(StorageReplica).filter_by(table_name=table_name,record_id=record_id).all()]
 @app.post('/queries')
 def query(x:QueryIn,u:User=Depends(current_user),db:Session=Depends(get_db)): return VirtualDatabaseLayer().execute(db,u,x.sql,x.preferred_node)
 @app.post('/queries/natural')
