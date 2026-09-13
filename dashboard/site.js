@@ -1,0 +1,1 @@
+const api=async(p,o={})=>{o.headers={...(o.headers||{}),Authorization:'Bearer '+localStorage.tavdb};let r=await fetch(p,o);if(!r.ok)throw Error((await r.json()).detail||'Request failed');return r.json()},load=()=>Promise.all([api('/nodes'),api('/audit/logs')]),tag=x=>'<span class="pill '+x.toLowerCase()+'">'+x+'</span>';

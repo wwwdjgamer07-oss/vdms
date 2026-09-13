@@ -1,26 +1,34 @@
 import json
 from contextlib import asynccontextmanager
+from pathlib import Path
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from .database import Base,engine,get_db
-from .models import User,Node,Database,QueryRequest,AuditLog
+from .models import User,Node,Database,QueryRequest,AuditLog,TableMetadata,ColumnMetadata
 from .security import hash_password,verify_password,token_for,current_user
-from .services import VirtualDatabaseLayer
+from .services import VirtualDatabaseLayer, NaturalLanguageTranslator, CLASSIFICATIONS
 def seed(db):
-    if db.query(Node).count(): return
-    nodes=[('trusted-node','TRUSTED',['SELECT']),('semi-trusted-node','SEMI_TRUSTED',['SELECT']),('non-trusted-node','NON_TRUSTED',['SELECT'])]
-    for name,trust,ops in nodes: db.add(Node(name=name,host=name,port=5432,database_name='employees',trust_level=trust,allowed_operations=json.dumps(ops),allowed_tables=json.dumps(['employees'])))
+    if not db.query(Node).count():
+      nodes=[('trusted-node','TRUSTED',['SELECT']),('semi-trusted-node','SEMI_TRUSTED',['SELECT']),('non-trusted-node','NON_TRUSTED',['SELECT'])]
+      for name,trust,ops in nodes: db.add(Node(name=name,host=name,port=5432,database_name='tavdb',trust_level=trust,allowed_operations=json.dumps(ops),allowed_tables=json.dumps(list(CLASSIFICATIONS))))
+    else:
+      for node in db.query(Node).all(): node.allowed_tables=json.dumps(list(CLASSIFICATIONS))
+    if not db.query(TableMetadata).count():
+      for table,columns in CLASSIFICATIONS.items():
+        db.add(TableMetadata(name=table))
+        for column,classification in columns.items(): db.add(ColumnMetadata(table_name=table,name=column,classification=classification))
     db.commit()
 @asynccontextmanager
 async def lifespan(app):
     Base.metadata.create_all(engine); db=next(get_db()); seed(db); db.close(); yield
 app=FastAPI(title='Trust-Aware Virtual Database',lifespan=lifespan)
-app.mount('/dashboard',StaticFiles(directory='dashboard',html=True),name='dashboard')
+app.mount('/dashboard',StaticFiles(directory=str(Path(__file__).resolve().parent.parent / 'dashboard'),html=True),name='dashboard')
 class Credentials(BaseModel): username:str=Field(min_length=2); password:str=Field(min_length=6)
 class NodeIn(BaseModel): name:str; host:str='localhost'; port:int=5432; database_name:str='employees'; trust_level:str; allowed_operations:list[str]=['SELECT']; allowed_tables:list[str]=['employees']
 class QueryIn(BaseModel): sql:str; preferred_node:str|None=None
+class NaturalQueryIn(BaseModel): prompt:str=Field(min_length=3,max_length=500); preferred_node:str|None=None
 class DatabaseIn(BaseModel): name:str; description:str=''
 @app.post('/auth/register')
 def register(x:Credentials,db:Session=Depends(get_db)):
@@ -42,6 +50,13 @@ def database(x:DatabaseIn,_:User=Depends(current_user),db:Session=Depends(get_db
 def databases(_:User=Depends(current_user),db:Session=Depends(get_db)): return db.query(Database).all()
 @app.post('/queries')
 def query(x:QueryIn,u:User=Depends(current_user),db:Session=Depends(get_db)): return VirtualDatabaseLayer().execute(db,u,x.sql,x.preferred_node)
+@app.post('/queries/natural')
+def natural_query(x:NaturalQueryIn,u:User=Depends(current_user),db:Session=Depends(get_db)):
+    try: sql=NaturalLanguageTranslator().translate(x.prompt)
+    except ValueError as e: raise HTTPException(422,str(e))
+    outcome=VirtualDatabaseLayer().execute(db,u,sql,x.preferred_node)
+    outcome['interpreted_sql']=sql
+    return outcome
 @app.get('/queries/{query_id}')
 def get_query(query_id:int,_:User=Depends(current_user),db:Session=Depends(get_db)):
     q=db.get(QueryRequest,query_id)

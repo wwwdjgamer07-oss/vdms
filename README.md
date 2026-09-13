@@ -39,6 +39,10 @@ pytest -q
 
 Or start services with `docker compose up --build`, then open `/docs` or `/dashboard/`. Register, log in, pass `Authorization: Bearer <token>`, and call `POST /queries` with `{ "sql": "SELECT name FROM employees", "preferred_node": "non-trusted-node" }`.
 
+## Vercel deployment
+
+Set `DATABASE_URL` to a hosted PostgreSQL URL and `JWT_SECRET` to a long random value in Vercel Project Settings before deploying. Standard `postgres://` and `postgresql://` provider URLs are normalized automatically for the installed `psycopg` driver. A Vercel deployment without `DATABASE_URL` uses ephemeral `/tmp` SQLite only as a preview fallback; data will not persist.
+
 ## Data model and audit
 
 SQLAlchemy models cover User, Database, Node, TableMetadata, ColumnMetadata, QueryRequest, QueryExecution, and AuditLog. Every decision includes requested data, selected node/trust level, reason, outcome, and duration at `GET /audit/logs`.

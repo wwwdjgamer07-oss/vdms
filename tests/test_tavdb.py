@@ -2,6 +2,7 @@ import os
 os.environ['DATABASE_URL']='sqlite:///./test_tavdb.db'
 from fastapi.testclient import TestClient
 from app.main import app
+from app.services import AdaptiveRoutingLearner
 def client():
     c=TestClient(app); c.__enter__(); return c
 def auth(c, name='tester'):
@@ -40,3 +41,17 @@ def test_database_crud():
  c=client();h=auth(c,'c12');c.post('/databases',headers=h,json={'name':'demo','description':'x'});assert any(x['name']=='demo' for x in c.get('/databases',headers=h).json());c.__exit__(None,None,None)
 def test_query_lookup():
  c=client();h=auth(c,'c13');q=run(c,h,'SELECT id FROM employees');assert c.get('/queries/'+str(q['query_id']),headers=h).status_code==200;c.__exit__(None,None,None)
+def test_natural_language_query():
+ c=client();h=auth(c,'c14');r=c.post('/queries/natural',headers=h,json={'prompt':'show employee names in Engineering','preferred_node':'non-trusted-node'}).json();assert r['decision']=='ALLOW' and r['interpreted_sql'].startswith('SELECT name');c.__exit__(None,None,None)
+def test_natural_language_sensitive_rewrite():
+ c=client();h=auth(c,'c15');r=c.post('/queries/natural',headers=h,json={'prompt':'show salaries','preferred_node':'non-trusted-node'}).json();assert r['decision']=='REWRITE';c.__exit__(None,None,None)
+def test_natural_language_salary_filter_and_limit():
+ c=client();h=auth(c,'c16');r=c.post('/queries/natural',headers=h,json={'prompt':'list the top 1 employee names with salary above 100,000'}).json();assert r['result'][0]['name']=='Alice';c.__exit__(None,None,None)
+def test_natural_language_average():
+ c=client();h=auth(c,'c17');r=c.post('/queries/natural',headers=h,json={'prompt':'what is the average salary'}).json();assert r['result'][0]['average_salary']==105000;c.__exit__(None,None,None)
+def test_general_purpose_customer_request():
+ c=client();h=auth(c,'c18');r=c.post('/queries/natural',headers=h,json={'prompt':'show customer names'}).json();assert r['result'][0]['name']=='Maya' and 'FROM customers' in r['interpreted_sql'];c.__exit__(None,None,None)
+def test_general_purpose_product_request():
+ c=client();h=auth(c,'c19');r=c.post('/queries/natural',headers=h,json={'prompt':'list product names and prices'}).json();assert r['decision']=='ALLOW' and r['result'][0]['name']=='Laptop';c.__exit__(None,None,None)
+def test_adaptive_learner_records_history():
+ c=client();h=auth(c,'c20');run(c,h,'SELECT id FROM employees','non-trusted-node');from app.database import SessionLocal;from app.models import Node;db=SessionLocal();score,stats=AdaptiveRoutingLearner().score(db,db.query(Node).filter_by(name='non-trusted-node').first());db.close();assert stats['samples']>=1 and score>=0;c.__exit__(None,None,None)
