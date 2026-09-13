@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from .database import Base,engine,get_db
 from .models import User,Node,Database,QueryRequest,AuditLog,TableMetadata,ColumnMetadata
 from .security import hash_password,verify_password,token_for,current_user
-from .services import VirtualDatabaseLayer, NaturalLanguageTranslator, CLASSIFICATIONS
+from .services import VirtualDatabaseLayer, NaturalLanguageTranslator, NodeHealthMonitor, CLASSIFICATIONS
 def seed(db):
     if not db.query(Node).count():
       nodes=[('trusted-node','TRUSTED',['SELECT']),('semi-trusted-node','SEMI_TRUSTED',['SELECT']),('non-trusted-node','NON_TRUSTED',['SELECT'])]
@@ -45,6 +45,12 @@ def login(x:Credentials,db:Session=Depends(get_db)):
     return {'access_token':token_for(u),'token_type':'bearer'}
 @app.get('/nodes')
 def nodes(_:User=Depends(current_user),db:Session=Depends(get_db)): return db.query(Node).all()
+@app.get('/nodes/health')
+def node_health(_:User=Depends(current_user),db:Session=Depends(get_db)):
+    monitor = NodeHealthMonitor()
+    report = [monitor.refresh(db, node) for node in db.query(Node).all()]
+    db.commit()
+    return report
 @app.post('/nodes')
 def node(x:NodeIn,_:User=Depends(current_user),db:Session=Depends(get_db)):
     n=Node(**x.model_dump(exclude={'allowed_operations','allowed_tables'}),allowed_operations=json.dumps(x.allowed_operations),allowed_tables=json.dumps(x.allowed_tables));db.add(n);db.commit();return n

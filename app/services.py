@@ -1,4 +1,5 @@
 import re, json, time
+from datetime import datetime
 from dataclasses import dataclass
 from sqlalchemy.orm import Session
 from .models import Node, QueryRequest, QueryExecution, AuditLog
@@ -12,6 +13,41 @@ CLASSIFICATIONS={
 }
 RANK={'PUBLIC':0,'INTERNAL':1,'CONFIDENTIAL':2,'HIGHLY_CONFIDENTIAL':3}
 SAFE_TABLES=set(CLASSIFICATIONS)
+
+
+class NodeHealthMonitor:
+    """Keeps routing state in sync with node integrity and execution health."""
+
+    def inspect(self, node):
+        try:
+            operations = json.loads(node.allowed_operations)
+            tables = json.loads(node.allowed_tables)
+        except (TypeError, json.JSONDecodeError):
+            return 'Node policy data is corrupted'
+        if not isinstance(operations, list) or not isinstance(tables, list):
+            return 'Node policy data is corrupted'
+        if not node.host or not isinstance(node.port, int) or not 1 <= node.port <= 65535:
+            return 'Node connection configuration is invalid'
+        if not set(tables).issubset(SAFE_TABLES):
+            return 'Node policy references unavailable tables'
+        return None
+
+    def mark_unavailable(self, db, node, reason):
+        node.status = 'UNAVAILABLE'
+        node.last_health_check = datetime.utcnow()
+        db.flush()
+        return {'node': node.name, 'status': node.status, 'available': False,
+                'reason': reason, 'last_health_check': node.last_health_check.isoformat() + 'Z'}
+
+    def refresh(self, db, node):
+        problem = self.inspect(node)
+        if problem:
+            return self.mark_unavailable(db, node, problem)
+        node.last_health_check = datetime.utcnow()
+        db.flush()
+        return {'node': node.name, 'status': node.status,
+                'available': node.status == 'HEALTHY', 'reason': None,
+                'last_health_check': node.last_health_check.isoformat() + 'Z'}
 class NaturalLanguageTranslator:
     """Offline employee-domain grammar. Its SQL output always returns to QueryParser."""
     synonyms={'employee id':'id','employee ids':'id','id':'id','identifier':'id','identifiers':'id','employee name':'name','employee names':'name','name':'name','names':'name','department':'department','departments':'department','team':'department','teams':'department','salary':'salary','salaries':'salary','pay':'salary','compensation':'salary','medical information':'medical_information','medical details':'medical_information','medical data':'medical_information','health information':'medical_information','medical':'medical_information'}
@@ -108,28 +144,33 @@ class VirtualDatabaseLayer:
         return self._audit(db,qr,user,parsed,'','DENY','No node may safely execute this query',started,[])
     def _run(self,db,qr,user,p,node,decision,reason,started):
         # Deterministic replica data for each configured demonstration domain.
-        data={
+        try:
+          data={
           'employees':[{'id':1,'name':'Alice','department':'Engineering','salary':120000,'medical_information':'restricted'},{'id':2,'name':'Bob','department':'Sales','salary':90000,'medical_information':'restricted'}],
           'customers':[{'id':1,'name':'Maya','city':'Delhi','email':'maya@example.test','phone':'9000000001'},{'id':2,'name':'Ravi','city':'Mumbai','email':'ravi@example.test','phone':'9000000002'}],
           'products':[{'id':1,'name':'Laptop','category':'Electronics','price':75000,'supplier_cost':50000},{'id':2,'name':'Chair','category':'Furniture','price':6000,'supplier_cost':3500}],
           'orders':[{'id':1,'customer_name':'Maya','product_name':'Laptop','status':'Shipped','total':75000},{'id':2,'customer_name':'Ravi','product_name':'Chair','status':'Processing','total':6000}],
           'students':[{'id':1,'name':'Asha','course':'Computer Science','marks':91,'guardian_contact':'restricted'},{'id':2,'name':'Dev','course':'Mathematics','marks':84,'guardian_contact':'restricted'}],
           'patients':[{'id':1,'name':'Patient A','department':'Cardiology','diagnosis':'restricted','medical_information':'restricted'},{'id':2,'name':'Patient B','department':'Neurology','diagnosis':'restricted','medical_information':'restricted'}]
-        }; rows=data[p.table]
-        if p.where:
-            for condition in re.split(r'\s+AND\s+',p.where,flags=re.I):
-                dept=re.fullmatch(r"department\s*=\s*'([^']+)'",condition,re.I); name=re.fullmatch(r"name\s*=\s*'([^']+)'",condition,re.I); salary=re.fullmatch(r'salary\s*(>=|<=|>|<|=)\s*(\d+)',condition,re.I)
-                if dept: rows=[r for r in rows if r['department'].lower()==dept.group(1).lower()]
-                elif name: rows=[r for r in rows if r['name'].lower()==name.group(1).lower()]
-                elif salary:
-                    op,n=salary.group(1),int(salary.group(2)); rows=[r for r in rows if {'>':r['salary']>n,'<':r['salary']<n,'>=':r['salary']>=n,'<=':r['salary']<=n,'=':r['salary']==n}[op]]
-                else: return self._audit(db,qr,user,p,node,'DENY','Only approved department, name, and salary filters are allowlisted',started,[])
-        if p.aggregate=='COUNT': result=[{'count':len(rows)}]
-        elif p.aggregate=='AVG': result=[{'average_'+p.columns[0]:sum(r[p.columns[0]] for r in rows)/len(rows) if rows else 0}]
-        elif p.aggregate=='SUM': result=[{'sum_'+p.columns[0]:sum(r[p.columns[0]] for r in rows)}]
-        else: result=[{c:r[c] for c in p.columns} for r in rows]
-        if p.limit: result=result[:p.limit]
-        return self._audit(db,qr,user,p,node,decision,reason,started,result)
+          }; rows=data[p.table]
+          if p.where:
+              for condition in re.split(r'\s+AND\s+',p.where,flags=re.I):
+                  dept=re.fullmatch(r"department\s*=\s*'([^']+)'",condition,re.I); name=re.fullmatch(r"name\s*=\s*'([^']+)'",condition,re.I); salary=re.fullmatch(r'salary\s*(>=|<=|>|<|=)\s*(\d+)',condition,re.I)
+                  if dept: rows=[r for r in rows if r['department'].lower()==dept.group(1).lower()]
+                  elif name: rows=[r for r in rows if r['name'].lower()==name.group(1).lower()]
+                  elif salary:
+                      op,n=salary.group(1),int(salary.group(2)); rows=[r for r in rows if {'>':r['salary']>n,'<':r['salary']<n,'>=':r['salary']>=n,'<=':r['salary']<=n,'=':r['salary']==n}[op]]
+                  else: return self._audit(db,qr,user,p,node,'DENY','Only approved department, name, and salary filters are allowlisted',started,[])
+          if p.aggregate=='COUNT': result=[{'count':len(rows)}]
+          elif p.aggregate=='AVG': result=[{'average_'+p.columns[0]:sum(r[p.columns[0]] for r in rows)/len(rows) if rows else 0}]
+          elif p.aggregate=='SUM': result=[{'sum_'+p.columns[0]:sum(r[p.columns[0]] for r in rows)}]
+          else: result=[{c:r[c] for c in p.columns} for r in rows]
+          if p.limit: result=result[:p.limit]
+          return self._audit(db,qr,user,p,node,decision,reason,started,result)
+        except (KeyError, TypeError, ValueError) as error:
+          health_reason = f'Execution integrity failure: {error}'
+          NodeHealthMonitor().mark_unavailable(db, node, health_reason)
+          return self._audit(db,qr,user,p,node,'DENY',health_reason,started,[])
     def _audit(self,db,qr,user,p,node,decision,reason,started,result):
         elapsed=int((time.monotonic()-started)*1000); qr.status='COMPLETED' if decision!='DENY' else 'DENIED'
         op=p.operation if p else 'INVALID'; table=p.table if p else ''; cols=','.join(p.columns) if p else ''
