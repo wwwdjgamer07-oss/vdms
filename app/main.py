@@ -2,6 +2,7 @@ import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 from fastapi import FastAPI, Depends, HTTPException
+from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -25,6 +26,9 @@ async def lifespan(app):
     Base.metadata.create_all(engine); db=next(get_db()); seed(db); db.close(); yield
 app=FastAPI(title='Trust-Aware Virtual Database',lifespan=lifespan)
 app.mount('/dashboard',StaticFiles(directory=str(Path(__file__).resolve().parent.parent / 'dashboard'),html=True),name='dashboard')
+@app.get('/', include_in_schema=False)
+def home():
+    return RedirectResponse(url='/dashboard/')
 class Credentials(BaseModel): username:str=Field(min_length=2); password:str=Field(min_length=6)
 class NodeIn(BaseModel): name:str; host:str='localhost'; port:int=5432; database_name:str='employees'; trust_level:str; allowed_operations:list[str]=['SELECT']; allowed_tables:list[str]=['employees']
 class QueryIn(BaseModel): sql:str; preferred_node:str|None=None
